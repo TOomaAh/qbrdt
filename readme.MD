@@ -39,9 +39,18 @@ cd qbrdt
 go build -o qbrdt cmd/qbrdt/main.go
 ```
 
-### Usage
+## Usage
 
 ```bash
 ./qbrdt
 ```
 
+
+
+## Contributing
+
+Contributions are welcome! Please fork the repository and create a pull request with your changes. Ensure you follow the coding standards and include tests for any new features or bug fixes.
+
+## License
+
+This project is licensed under the MIT License. See the LICENSE file for more details.
