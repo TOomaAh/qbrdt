@@ -1,14 +1,20 @@
 package database
 
 import (
+	"os"
+
 	"github.com/TOomaAh/qbrdt/pkg/logger"
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
 func NewDatabase(logger logger.Interface) *gorm.DB {
 
-	db, err := gorm.Open(sqlite.Open("qbrdt.db"), &gorm.Config{})
+	if os.Getenv("QBRDT_DB") == "" {
+		os.Setenv("QBRDT_DB", "qbrdt.db")
+	}
+
+	db, err := gorm.Open(sqlite.Open(os.Getenv("QBRDT_DB")), &gorm.Config{})
 
 	if err != nil {
 		logger.Fatal("failed to connect database")

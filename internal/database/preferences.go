@@ -24,6 +24,7 @@ func NewPreferencesRepository(db *gorm.DB, savePath string) *PreferencesReposito
 	}
 
 	if savePath != p.SavePath {
+		p.ID = 1
 		db.Model(p).Update("save_path", savePath)
 	}
 

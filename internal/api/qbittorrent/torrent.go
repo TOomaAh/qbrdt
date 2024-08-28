@@ -165,7 +165,7 @@ type QbittorentTorrent struct {
 }
 
 func NewQbittorrentTorrentApi(l logger.Interface,
-	e *echo.Group,
+	auth *echo.Group,
 	preference *database.PreferencesRepository,
 	category *database.CategoryRepository,
 	torrents *database.TorrentRepository,
@@ -181,7 +181,7 @@ func NewQbittorrentTorrentApi(l logger.Interface,
 		logger:     l,
 	}
 
-	g := e.Group("/torrents")
+	g := auth.Group("/torrents")
 	g.GET("/categories", torrentApi.categories)
 	g.POST("/categories", torrentApi.categories)
 	g.GET("/createCategory", torrentApi.saveCatergories)
@@ -381,8 +381,7 @@ func (q *QBittorrentTorrentApi) torrentsFiles(c echo.Context) error {
 		}
 	}
 
-	queryHash = strings.ToUpper(queryHash)
-	torrent, err := q.torrents.FindByRDId(queryHash)
+	torrent, err := q.torrents.FindByHash(queryHash)
 
 	if err != nil {
 		return Fails(c)
@@ -432,8 +431,7 @@ func (q *QBittorrentTorrentApi) torrentsProperties(c echo.Context) error {
 		}
 	}
 
-	queryHash = strings.ToUpper(queryHash)
-	torrent, err := q.torrents.FindByRDId(queryHash)
+	torrent, err := q.torrents.FindByHash(queryHash)
 
 	if err != nil {
 		return Fails(c)
@@ -607,8 +605,7 @@ func (q *QBittorrentTorrentApi) deleteTorrent(c echo.Context) error {
 			// split hash with '|'
 			hashes := strings.Split(hash, "|")
 			for _, h := range hashes {
-				h = strings.ToUpper(h)
-				torrent, err := q.torrents.FindByRDId(h)
+				torrent, err := q.torrents.FindByHash(h)
 
 				if err != nil {
 					return Fails(c)

@@ -9,6 +9,7 @@ import (
 	"github.com/TOomaAh/qbrdt/pkg/downloader"
 	"github.com/TOomaAh/qbrdt/pkg/logger"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	"github.com/robfig/cron/v3"
 )
 
@@ -80,7 +81,7 @@ func (qbrdt *QBRDT) Run() {
 	e := echo.New()
 
 	e.HideBanner = true
-	//e.Use(middleware.Logger())
+	e.Use(middleware.Logger())
 
 	c := cron.New()
 	c.AddJob("@every "+qbrdt.conf.Qbrdt.TorrentRefreshInterval+"s", jobs.NewTorrentUpdater(
@@ -96,10 +97,19 @@ func (qbrdt *QBRDT) Run() {
 
 	defer c.Stop()
 
-	api := e.Group("/api/v2")
-	qbittorrent.NewQbittorrentAuthenticationApi(api, qbrdt.conf.QBittorrent.Username, qbrdt.conf.QBittorrent.Password)
-	qbittorrent.NewQbittorrentAppApi(api, qbrdt.preferences)
-	qbittorrent.NewQbittorrentTorrentApi(qbrdt.logger, api, qbrdt.preferences, qbrdt.categories, qbrdt.torrents, qbrdt.client)
+	authApi := e.Group("/api/v2")
+	authApi.Use(middleware.BasicAuth(func(username, password string, c echo.Context) (bool, error) {
+		if username == qbrdt.conf.QBittorrent.Username && password == qbrdt.conf.QBittorrent.Password {
+			return true, nil
+		}
+		return false, nil
+	}))
+
+	noAuthApi := e.Group("/api/v2")
+
+	qbittorrent.NewQbittorrentAuthenticationApi(noAuthApi, qbrdt.conf.QBittorrent.Username, qbrdt.conf.QBittorrent.Password)
+	qbittorrent.NewQbittorrentAppApi(noAuthApi, qbrdt.preferences)
+	qbittorrent.NewQbittorrentTorrentApi(qbrdt.logger, authApi, qbrdt.preferences, qbrdt.categories, qbrdt.torrents, qbrdt.client)
 
 	e.Logger.Fatal(e.Start(":" + qbrdt.conf.QBittorrent.Port))
 

@@ -99,6 +99,12 @@ func (r *TorrentRepository) FindByRDId(rdId string) (*Torrent, error) {
 	return &torrent, err
 }
 
+func (r *TorrentRepository) FindByHash(hash string) (*Torrent, error) {
+	var torrent Torrent
+	err := r.db.Where("rd_hash = ?", hash).First(&torrent).Error
+	return &torrent, err
+}
+
 func (r *TorrentRepository) Update(torrent *Torrent) error {
 	return r.db.Save(torrent).Error
 }
