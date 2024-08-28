@@ -8,8 +8,8 @@ import (
 	"github.com/TOomaAh/qbrdt/internal/jobs"
 	"github.com/TOomaAh/qbrdt/pkg/downloader"
 	"github.com/TOomaAh/qbrdt/pkg/logger"
-	"github.com/bamzi/jobrunner"
 	"github.com/labstack/echo/v4"
+	"github.com/robfig/cron/v3"
 )
 
 type QBRDT struct {
@@ -31,6 +31,38 @@ func New(logger logger.Interface, conf *config.QBRDTConfig) *QBRDT {
 	torrents := database.NewTorrentRepository(db)
 	downloads := database.NewDownloadRepository(db)
 	client := gorealdebrid.NewRealDebridClient(conf.RealDebrid.Token)
+	d := downloader.NewDownloader(
+		conf.Downloader.Chunk,
+		conf.Downloader.SpeedLimit,
+		conf.Downloader.MaxDownloads,
+		logger,
+	)
+
+	d.OnStart = func(download *downloader.Download) {
+		download.Object.(*database.Download).IsDownloaded = false
+		downloads.Update(download.Object.(*database.Download))
+
+		t, err := torrents.FindOne(download.Object.(*database.Download).TorrentId)
+
+		if err != nil {
+			logger.Error("Error while updating torrent status to downloading")
+			return
+		}
+
+		t.InternalStatus = database.TorrentInternalDownloading
+	}
+
+	d.OnUpdate = func(download *downloader.Download) {
+
+	}
+	d.OnFinish = func(download *downloader.Download) {
+		download.Object.(*database.Download).IsDownloaded = true
+		downloads.Update(download.Object.(*database.Download))
+		// if all downloads are downloaded, update torrent status to downloaded
+		if torrents.AllDownloadsAreDownloaded(download.Object.(*database.Download).TorrentId) {
+			torrents.UpdateTorrentStatusToDownloaded(download.Object.(*database.Download).TorrentId)
+		}
+	}
 	return &QBRDT{
 		logger:      logger,
 		conf:        conf,
@@ -39,21 +71,7 @@ func New(logger logger.Interface, conf *config.QBRDTConfig) *QBRDT {
 		torrents:    torrents,
 		downloads:   downloads,
 		client:      client,
-		downloader: downloader.NewDownloader(
-			conf.Downloader.Chunk,
-			conf.Downloader.SpeedLimit,
-			conf.Downloader.MaxDownloads,
-			logger,
-			func(download *downloader.Download) {
-			},
-			func(download *downloader.Download) {
-				download.Object.(*database.Download).Downloaded = true
-				downloads.Update(download.Object.(*database.Download))
-				// if all downloads are downloaded, update torrent status to downloaded
-				if torrents.AllDownloadsAreDownloaded(download.Object.(*database.Download).TorrentId) {
-					torrents.UpdateTorrentStatusToDownloaded(download.Object.(*database.Download).TorrentId)
-				}
-			}),
+		downloader:  d,
 	}
 }
 
@@ -64,12 +82,8 @@ func (qbrdt *QBRDT) Run() {
 	e.HideBanner = true
 	//e.Use(middleware.Logger())
 
-	// on startup make clean all downloads and put torrent with status downloading to waiting_for_download
-	qbrdt.downloads.CleanAllDownloads()
-	qbrdt.torrents.UpdateTorrentsStatusToWaitingForDownload()
-
-	jobrunner.Start()
-	jobrunner.Schedule("@every "+qbrdt.conf.Qbrdt.TorrentRefreshInterval+"s", jobs.NewTorrentUpdater(
+	c := cron.New()
+	c.AddJob("@every "+qbrdt.conf.Qbrdt.TorrentRefreshInterval+"s", jobs.NewTorrentUpdater(
 		qbrdt.client,
 		qbrdt.downloader,
 		qbrdt.torrents,
@@ -77,9 +91,10 @@ func (qbrdt *QBRDT) Run() {
 		qbrdt.preferences,
 		qbrdt.logger,
 	))
-	qbrdt.logger.Info("Torrent updater job scheduled every " + qbrdt.conf.Qbrdt.TorrentRefreshInterval + "s")
 
-	defer jobrunner.Stop()
+	c.Start()
+
+	defer c.Stop()
 
 	api := e.Group("/api/v2")
 	qbittorrent.NewQbittorrentAuthenticationApi(api, qbrdt.conf.QBittorrent.Username, qbrdt.conf.QBittorrent.Password)

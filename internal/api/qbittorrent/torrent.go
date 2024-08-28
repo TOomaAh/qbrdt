@@ -289,12 +289,14 @@ func (q *QBittorrentTorrentApi) torrentsInfo(c echo.Context) error {
 		}
 
 		var status string
-		if v.Status == database.TorrentStatusDownloading {
+		if v.Status == database.TorrentStatusDownloading || (v.Status == database.TorrentStatusDownloaded && v.InternalStatus == database.TorrentInternalDownloading) {
 			status = "downloading"
-		} else if v.Status == database.TorrentStatusDownloaded {
+		} else if v.Status == database.TorrentStatusDownloaded && v.InternalStatus == database.TorrentInternalDownloaded {
 			status = "pausedUP"
 		} else if v.Status == database.TorrentStatusError {
 			status = "error"
+		} else if v.Status == database.TorrentStatusDownloading && v.RDSeeders == 0 {
+			status = "stalledDL"
 		} else {
 			status = "paused"
 		}
@@ -315,9 +317,9 @@ func (q *QBittorrentTorrentApi) torrentsInfo(c echo.Context) error {
 			ETA:               0,
 			FLPiecePrio:       false,
 			ForceStart:        false,
-			Hash:              v.RDId,
+			Hash:              v.RDHash,
 			IsPrivate:         false,
-			LastActivity:      0,
+			LastActivity:      v.UpdatedAt.Unix(),
 			MagnetURI:         "",
 			MaxRatio:          0,
 			MaxSeedingTime:    0,
@@ -515,6 +517,7 @@ func (q *QBittorrentTorrentApi) addTorrent(c echo.Context, content io.Reader, ca
 		RDHost:     rdTorrent.Host,
 		RDSpeed:    speed,
 		RDSeeders:  seeders,
+		RDHash:     rdTorrent.Hash,
 	}
 
 	if err := q.torrents.Create(torrent); err != nil {
@@ -532,10 +535,6 @@ func (q *QBittorrentTorrentApi) addTorrentFromUrls(c echo.Context) error {
 func (q *QBittorrentTorrentApi) addTorrentFromFile(c echo.Context) error {
 
 	var addTorrentRequest QbittorentAddRequest
-
-	params := c.Request().Form
-
-	q.logger.Info("Params %s", params)
 
 	if err := c.Bind(&addTorrentRequest); err != nil {
 		return Fails(c)
@@ -598,6 +597,8 @@ func (q *QBittorrentTorrentApi) deleteTorrent(c echo.Context) error {
 
 	values := strings.Split(string(body), "&")
 
+	savePath := q.preference.GetSavePath()
+
 	// exemple value = "hashes=5cw3eirtiyij4&deleteFiles=true"
 	// get hash but search for "hashes=" and remove it
 	for _, v := range values {
@@ -607,6 +608,16 @@ func (q *QBittorrentTorrentApi) deleteTorrent(c echo.Context) error {
 			hashes := strings.Split(hash, "|")
 			for _, h := range hashes {
 				h = strings.ToUpper(h)
+				torrent, err := q.torrents.FindByRDId(h)
+
+				if err != nil {
+					return Fails(c)
+				}
+
+				if err := os.RemoveAll(savePath + string(os.PathSeparator) + torrent.Category + string(os.PathSeparator) + torrent.RDName); err != nil {
+					return Fails(c)
+				}
+
 				if err := q.torrents.DeleteByRDId(h); err != nil {
 					return Fails(c)
 				}

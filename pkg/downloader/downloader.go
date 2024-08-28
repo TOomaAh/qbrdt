@@ -16,8 +16,9 @@ type Downloader struct {
 	speedLimit   int
 	downloadLock chan struct{}
 	logger       logger.Interface
-	onFinish     func(download *Download)
-	onUpdate     func(download *Download)
+	OnStart      func(download *Download)
+	OnUpdate     func(download *Download)
+	OnFinish     func(download *Download)
 }
 
 type Progress struct {
@@ -29,27 +30,34 @@ type Progress struct {
 }
 
 type Download struct {
-	Url      string
-	FileName string
-	FileSize int64
-	SavePath string
-	Object   interface{}
+	Index      int
+	Url        string
+	FileName   string
+	FileSize   int64
+	SavePath   string
+	Progress   int
+	Downloaded int64
+	Remaining  time.Duration
+	Object     interface{}
+	lock       sync.Mutex
 }
 
-func NewDownloader(chunk, speedLimit, maxDownlaods int, logger logger.Interface, onUpdate func(download *Download), onFinish func(download *Download)) *Downloader {
+func NewDownloader(chunk, speedLimit, maxDownlaods int, logger logger.Interface) *Downloader {
 	logger.Info("Initialisation of downloader with %d chunks, speed limit %d KB/s and %d simultaneous downloads", chunk, speedLimit, maxDownlaods)
 	return &Downloader{
 		chunk:        chunk,
 		speedLimit:   speedLimit,
 		downloadLock: make(chan struct{}, maxDownlaods),
 		logger:       logger,
-		onUpdate:     onUpdate,
-		onFinish:     onFinish,
+		OnStart:      func(download *Download) {},
+		OnUpdate:     func(download *Download) {},
+		OnFinish:     func(download *Download) {},
 	}
 }
 
 func (d *Downloader) AddDownload(download *Download) {
 	progressChan := make(chan Progress)
+	download.lock = sync.Mutex{}
 
 	// Lancer le téléchargement dans une goroutine
 	go func() {
@@ -59,22 +67,29 @@ func (d *Downloader) AddDownload(download *Download) {
 			// Déverrouiller le téléchargement
 			<-d.downloadLock
 		}()
-		err := d.downloadFile(*download, progressChan)
+		err := d.downloadFile(download, progressChan)
 		if err != nil {
 			fmt.Printf("Erreur lors du téléchargement : %v\n", err)
 		}
 		close(progressChan)
 
 		// Appeler la fonction de rappel onFinish
-		d.onFinish(download)
+		d.OnFinish(download)
 
 	}()
+	for progress := range progressChan {
 
-	// Afficher la progression au fur et à mesure sur la même ligne
-	/*for progress := range progressChan {
-		fmt.Printf("\rTéléchargé %d/%d octets (%.2f%%) à %.2f KB/s, temps restant estimé : %v",
-			progress.Downloaded, progress.Total, progress.Percent, progress.Speed/1024, progress.Remaining)
-	}*/
+		download.lock.Lock()
+
+		// update download object
+		download.Progress = int(progress.Percent) / d.chunk
+		download.Downloaded = download.Downloaded + progress.Downloaded
+		download.Remaining = progress.Remaining * time.Duration(d.chunk)
+
+		download.lock.Unlock()
+
+		d.OnUpdate(download)
+	}
 }
 
 // Fonction pour fusionner les chunks en un seul fichier
@@ -109,7 +124,7 @@ func (d *Downloader) mergeChunks(filePath string) error {
 }
 
 // Fonction pour télécharger le fichier en plusieurs chunks
-func (d *Downloader) downloadFile(download Download, progressChan chan<- Progress) error {
+func (d *Downloader) downloadFile(download *Download, progressChan chan<- Progress) error {
 	// Faire une requête HEAD pour obtenir la taille du fichier
 
 	// Obtenir la taille totale du fichier
@@ -201,16 +216,16 @@ func (d *Downloader) downloadChunk(url, filePath string, start, end int64, progr
 			// Calculer la vitesse de téléchargement et le temps restant
 			elapsedTime := time.Since(startTime).Seconds()
 			speed := float64(downloadedSize) / elapsedTime
-			//remaining := time.Duration(float64(end-start-downloadedSize)/speed) * time.Second
+			remaining := time.Duration(float64(end-start-downloadedSize)/speed) * time.Second
 
 			// Envoyer la progression sur le canal
-			/*progressChan <- Progress{
+			progressChan <- Progress{
 				Downloaded: downloadedSize,
 				Total:      end - start + 1,
 				Percent:    float64(downloadedSize) / float64(end-start+1) * 100,
 				Speed:      speed,
 				Remaining:  remaining,
-			}*/
+			}
 
 			// Limiter la vitesse si nécessaire, sauf si maxSpeedKBps est à 0
 			if d.speedLimit > 0 && speed > float64(maxSpeed) {

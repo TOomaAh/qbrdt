@@ -54,6 +54,7 @@ type Torrent struct {
 	RDHost         string                `json:"rd_host"`
 	RDSpeed        int                   `json:"rd_speed"`
 	RDSeeders      int                   `json:"rd_seeders"`
+	RDHash         string                `json:"rd_hash"`
 	InternalStatus TorrentInternalStatus `json:"internal_status"`
 }
 
@@ -78,6 +79,12 @@ func (r *TorrentRepository) FindAll() ([]Torrent, error) {
 	var torrents []Torrent
 	err := r.db.Find(&torrents).Error
 	return torrents, err
+}
+
+func (r *TorrentRepository) FindOne(id uint) (*Torrent, error) {
+	var torrent Torrent
+	err := r.db.First(&torrent, id).Error
+	return &torrent, err
 }
 
 func (r *TorrentRepository) FindAllNotDownloaded() ([]Torrent, error) {
@@ -133,8 +140,14 @@ func (r *TorrentRepository) UpdateTorrentsStatusToWaitingForDownload() error {
 
 func (r *TorrentRepository) AllDownloadsAreDownloaded(torrentId uint) bool {
 	var count int64
-	r.db.Model(&Download{}).Where("torrent_id = ? AND downloaded = ?", torrentId, false).Count(&count)
+	r.db.Model(&Download{}).Where("torrent_id = ? AND is_downloaded = ?", torrentId, false).Count(&count)
 	return count == 0
+}
+
+func (r *TorrentRepository) HavePendingDownloads(torrentId uint) bool {
+	var count int64
+	r.db.Model(&Download{}).Where("torrent_id = ? AND is_downloaded = ?", torrentId, false).Count(&count)
+	return count > 0
 }
 
 func (r *TorrentRepository) HasDownload(torrentId uint) bool {

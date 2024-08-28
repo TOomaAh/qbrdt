@@ -24,6 +24,29 @@ func NewTorrentUpdater(client *gorealdebrid.RealDebridClient,
 	download *database.DownloadRepository,
 	preferences *database.PreferencesRepository,
 	logger logger.Interface) *TorrentUpdater {
+
+	download.CleanAllDownloads()
+	torrents.UpdateTorrentsStatusToWaitingForDownload()
+
+	allTorrent, err := torrents.FindAll()
+
+	if err != nil {
+		logger.Error("Error getting all torrents: %s", err)
+	}
+
+	for _, torrent := range allTorrent {
+		downloads, err := download.FindAllByRdId(torrent.ID)
+		if err != nil {
+			logger.Error("Error getting downloads for torrent %d: %s", torrent.ID, err)
+		}
+
+		if len(downloads) == 0 {
+			torrent.InternalStatus = database.TorrentInternalWaitingForDownload
+			torrents.Update(&torrent)
+		}
+
+	}
+
 	return &TorrentUpdater{
 		client:      client,
 		torrents:    torrents,
@@ -44,22 +67,6 @@ func (tu *TorrentUpdater) DeleteTorrent(id string) error {
 	return tu.client.DeleteTorrent(id)
 }
 
-func (tu *TorrentUpdater) updateInternalStatus(torrent *database.Torrent, rdtTorrent *gorealdebrid.Torrent) {
-	if (torrent.InternalStatus == database.TorrentInternalWaitingForDownload ||
-		torrent.InternalStatus == database.TorrentInternalError ||
-		torrent.InternalStatus == database.TorrentInternalDownloading) && rdtTorrent.Status == "downloaded" {
-		return
-	}
-	switch rdtTorrent.Status {
-	case "downloaded":
-		torrent.InternalStatus = database.TorrentInternalWaitingForDownload
-	case "dead":
-		torrent.InternalStatus = database.TorrentInternalError
-	default:
-		torrent.InternalStatus = database.TorrentInternalWaiting
-	}
-}
-
 func (tu *TorrentUpdater) Run() {
 
 	tu.logger.Info("Running torrent updater")
@@ -77,58 +84,130 @@ func (tu *TorrentUpdater) Run() {
 			tu.torrents.Delete(torrent.ID)
 		}
 
-		// if all of downloads is terminated return
-		if tu.torrents.HasDownload(torrent.ID) && tu.torrents.AllDownloadsAreDownloaded(torrent.ID) {
-			torrent.Status = "downloaded"
-			torrent.InternalStatus = database.TorrentInternalDownloaded
+		// if torrent has pending downloads, set it to waiting for download
+		if tu.torrents.HavePendingDownloads(torrent.ID) {
+			if torrent.InternalStatus != database.TorrentInternalDownloading {
+				torrent.InternalStatus = database.TorrentInternalWaitingForDownload
+				tu.torrents.Update(&torrent)
+			}
+			continue
+		}
+
+		if torrent.InternalStatus == database.TorrentInternalDownloaded && torrent.Status == database.TorrentStatusDownloaded && !tu.torrents.HasDownload(torrent.ID) {
+			torrent.InternalStatus = database.TorrentInternalWaitingForDownload
+			tu.torrents.Update(&torrent)
+		}
+
+		info, err := tu.client.GetTorrent(torrent.RDId)
+
+		// if torrent is not found, delete it
+		if err != nil {
+			tu.logger.Error("Error getting torrent info: %s", err)
+			tu.DeleteTorrent(torrent.RDId)
+			tu.torrents.Delete(torrent.ID)
+			continue
+		}
+
+		var needUpdate bool
+		if torrent.RDProgress != info.Progress {
+			torrent.RDProgress = info.Progress
+			needUpdate = true
+		}
+
+		if info.Seeders != nil && torrent.RDSeeders != *info.Seeders {
+			torrent.RDSeeders = *info.Seeders
+			needUpdate = true
+		}
+
+		if info.Speed != nil && torrent.RDSpeed != *info.Speed {
+			torrent.RDSpeed = *info.Speed
+			needUpdate = true
+		}
+
+		if needUpdate {
+			tu.torrents.Update(&torrent)
+		}
+
+		// if torrent is waiting for files selection, accept it
+		if info.Status == "waiting_files_selection" {
+			tu.acceptTorrent(torrent.RDId)
+			torrent.InternalStatus = database.TorrentInternalWaitingForDownload
+			tu.torrents.Update(&torrent)
+		}
+
+		if info.Status == "downloaded" {
+			if torrent.Status != database.TorrentStatusDownloaded {
+				torrent.Status = database.TorrentStatusDownloaded
+				tu.torrents.Update(&torrent)
+			}
+		}
+
+		// if torrent is dead, delete it
+		if info.Status == "dead" {
+			tu.logger.Error("Torrent " + torrent.RDId + " is dead, deleting it")
+			tu.DeleteTorrent(torrent.RDId)
+			tu.torrents.Delete(torrent.ID)
+			continue
+		}
+
+		// if torrent is downloading, wait for download to finish
+		if info.Status == "downloading" {
+			if torrent.Status != database.TorrentStatusDownloading {
+				torrent.InternalStatus = database.TorrentInternalDownloading
+				tu.torrents.Update(&torrent)
+			}
+			continue
+		}
+
+		// if torrent is downloaded, but have pending downloads, set it to waiting for download
+		if info.Status == "downloaded" && tu.torrents.HavePendingDownloads(torrent.ID) {
+			var needUpdate bool
+			if torrent.Status != database.TorrentStatusDownloaded {
+				torrent.Status = database.TorrentStatusDownloaded
+				needUpdate = true
+			}
+
+			if torrent.InternalStatus != database.TorrentInternalDownloading {
+				torrent.InternalStatus = database.TorrentInternalWaitingForDownload
+				needUpdate = true
+			}
+
+			if needUpdate {
+				tu.torrents.Update(&torrent)
+			}
+			continue
+		}
+
+		if torrent.Status == database.TorrentStatusDownloaded && torrent.InternalStatus == database.TorrentInternalWaitingForDownload {
+			torrent.InternalStatus = database.TorrentInternalDownloading
+			tu.torrents.Update(&torrent)
+			tu.saveDownload(&torrent, info)
+			continue
+		}
+
+		// if torrent is queued, set it to queued
+		if info.Status == "queue" {
+			if torrent.Status != database.TorrentStatusQueued {
+				torrent.Status = database.TorrentStatusQueued
+				tu.torrents.Update(&torrent)
+			}
+			continue
+		}
+
+		// if torrent is uploading, set it to checkingUP
+		if info.Status == "uploading" {
+			if torrent.Status != "checkingUP" {
+				torrent.Status = "checkingUP"
+				tu.torrents.Update(&torrent)
+			}
+			continue
+		}
+
+		// if torrent is in unknown status, set it to unknown
+		if info.Status == "" {
+			torrent.Status = "unknown"
 			tu.torrents.Update(&torrent)
 			continue
-		} else {
-			info, err := tu.client.GetTorrent(torrent.RDId)
-			if err != nil {
-				tu.logger.Error("Error getting torrent info: %s", err)
-				tu.DeleteTorrent(torrent.RDId)
-				tu.torrents.Delete(torrent.ID)
-				continue
-			}
-			tu.updateInternalStatus(&torrent, info)
-
-			switch info.Status {
-			case "downloaded":
-				if torrent.InternalStatus == database.TorrentInternalWaitingForDownload {
-					tu.saveDownload(&torrent, info)
-					torrent.InternalStatus = database.TorrentInternalDownloading
-				}
-
-				if torrent.InternalStatus == database.TorrentInternalDownloading {
-					torrent.Status = "downloading"
-				} else {
-					torrent.Status = "pausedUP"
-				}
-			case "dead":
-				torrent.Status = "error"
-			case "queue":
-				torrent.Status = "queuedUP"
-			case "downloading":
-				torrent.Status = "downloading"
-			case "uploading":
-				torrent.Status = "checkingUP"
-			case "waiting_files_selection":
-				tu.acceptTorrent(torrent.RDId)
-			default:
-				torrent.Status = "unknown"
-			}
-
-			torrent.RDProgress = info.Progress
-
-			if info.Seeders != nil {
-				torrent.RDSeeders = *info.Seeders
-			}
-			if info.Speed != nil {
-				torrent.RDSpeed = *info.Speed
-			}
-
-			tu.torrents.Update(&torrent)
 		}
 
 	}
@@ -144,13 +223,13 @@ func (tu *TorrentUpdater) saveDownload(torrent *database.Torrent, info *gorealde
 		}
 
 		download := &database.Download{
-			UserId:     0,
-			TorrentId:  torrent.ID,
-			FileName:   debrid.Filename,
-			FileSize:   debrid.FileSize,
-			Downloaded: false,
-			Url:        debrid.Download,
-			SavePath:   tu.preferences.GetSavePath() + string(os.PathSeparator) + torrent.Category + string(os.PathSeparator) + torrent.RDName,
+			UserId:       0,
+			TorrentId:    torrent.ID,
+			FileName:     debrid.Filename,
+			FileSize:     debrid.FileSize,
+			IsDownloaded: false,
+			Url:          debrid.Download,
+			SavePath:     tu.preferences.GetSavePath() + string(os.PathSeparator) + torrent.Category + string(os.PathSeparator) + torrent.RDName,
 		}
 
 		d := tu.download.Create(download)
@@ -161,7 +240,7 @@ func (tu *TorrentUpdater) saveDownload(torrent *database.Torrent, info *gorealde
 
 		tu.logger.Info("Start downloading %s", download.FileName)
 
-		tu.downloader.AddDownload(&downloader.Download{
+		go tu.downloader.AddDownload(&downloader.Download{
 			Url:      download.Url,
 			FileName: download.FileName,
 			FileSize: download.FileSize,
